@@ -5,16 +5,23 @@ const required = (result, label) => {
   return result.data ?? [];
 };
 
-const accountFromDb = (row) => ({ id: row.id, type: row.account_type, institution: row.institution, name: row.name, currency: row.currency, balance: Number(row.balance), lastFour: row.last_four || "", includeInNetWorth: row.include_in_net_worth, archived: Boolean(row.archived_at), order: row.position });
-const accountToDb = (row, userId) => ({ id: row.id, user_id: userId, account_type: row.type, institution: row.institution, name: row.name, currency: row.currency, balance: Number(row.balance), last_four: row.lastFour || null, include_in_net_worth: row.includeInNetWorth !== false, archived_at: row.archived ? new Date().toISOString() : null, position: row.order ?? 0 });
+const accountFromDb = (row) => ({ id: row.id, type: row.account_type, institution: row.institution, institutionLogo: row.institution_logo || "", name: row.name, currency: row.currency, balance: Number(row.balance), lastFour: row.last_four || "", balanceDate: row.balance_date || row.updated_at?.slice(0, 10), includeInAvailableCash: row.include_in_available_cash, includeInNetWorth: row.include_in_net_worth, includeTransactionsInBudgets: row.include_transactions_in_budgets, isPrimarySpending: row.is_primary_spending, createdVia: row.created_via || "manual", balanceConfirmed: row.balance_confirmed !== false, updatedAt: row.updated_at, archived: Boolean(row.archived_at), order: row.position });
+const accountToDb = (row, userId) => ({ id: row.id, user_id: userId, account_type: row.type, institution: row.institution, institution_logo: row.institutionLogo || null, name: row.name, currency: row.currency, balance: Number(row.balance), last_four: row.lastFour || null, balance_date: row.balanceDate || new Date().toISOString().slice(0, 10), include_in_available_cash: row.includeInAvailableCash !== false, include_in_net_worth: row.includeInNetWorth !== false, include_transactions_in_budgets: row.includeTransactionsInBudgets !== false, is_primary_spending: Boolean(row.isPrimarySpending), created_via: row.createdVia || "manual", balance_confirmed: row.balanceConfirmed !== false, archived_at: row.archived ? new Date().toISOString() : null, position: row.order ?? 0 });
 const categoryFromDb = (row) => ({ id: row.id, name: row.name, group: row.group_key, order: row.position, archived: Boolean(row.archived_at), _parentId: row.parent_id });
 const transactionFromDb = (row, contributionMap) => ({ id: row.id, type: row.transaction_type, flowKind: row.flow_kind, merchant: row.merchant, category: row.budget_categories?.name || (row.transaction_type === "transfer" ? "Transfer" : "Other"), categoryId: row.category_id, dateValue: row.occurred_on, timeValue: row.occurred_at?.slice(0, 5) || "12:00", amount: Number(row.amount), status: row.status, accountId: row.account_id, fromAccountId: row.from_account_id, toAccountId: row.to_account_id, goalId: contributionMap.get(row.id), notes: row.notes || "", recurring: row.recurring, frequency: row.frequency || "Monthly", icon: row.transaction_type === "transfer" ? "↔" : row.merchant.slice(0, 1).toUpperCase(), tone: row.transaction_type === "income" ? "green" : row.transaction_type === "transfer" ? "blue" : "red", currency: row.currency, archived: Boolean(row.archived_at) });
 const budgetFromDb = (row) => ({ id: row.id, group: row.budget_categories?.group_key || "flexible", category: row.budget_categories?.name || "Other", categoryId: row.category_id, transactionCategory: row.budget_categories?.name || "Other", planned: Number(row.planned_amount), frequency: row.frequency, dueDate: row.due_date || row.month, reminder: row.reminder_enabled, reminderDays: String(row.reminder_days), custom: false, month: row.month, archived: Boolean(row.archived_at) });
-const debtFromDb = (row) => ({ id: row.id, type: row.debt_type, creditor: row.creditor, balance: Number(row.current_balance), interestRate: Number(row.interest_rate), minimumPayment: Number(row.minimum_payment), dueDate: row.due_date, frequency: row.payment_frequency, originalBalance: Number(row.original_balance), linkedAccountId: row.liability_account_id, customPosition: row.custom_position, archived: Boolean(row.archived_at) });
-const goalFromDb = (row, history) => ({ id: row.id, type: row.goal_type, name: row.name, targetAmount: Number(row.target_amount), baseAmount: Number(row.base_amount), deadline: row.deadline, linkedAccountId: row.linked_account_id || "", monthlyContribution: Number(row.monthly_contribution), status: row.status, archived: Boolean(row.archived_at), history: history.filter((item) => item.goal_id === row.id).map((item) => ({ id: item.id, type: item.contribution_type === "withdrawal" ? "Withdrawal" : "Contribution", amount: Number(item.amount), date: item.contributed_on, source: "Supabase transfer" })) });
+const debtFromDb = (row, payments) => {
+  const paymentTotal = payments.filter((item) => item.debt_id === row.id).reduce((sum, item) => sum + Number(item.amount), 0);
+  return { id: row.id, type: row.debt_type, creditor: row.creditor, balance: Number(row.current_balance), interestRate: Number(row.interest_rate), minimumPayment: Number(row.minimum_payment), dueDate: row.due_date, frequency: row.payment_frequency, originalBalance: Number(row.original_balance), paidAmount: paymentTotal, linkedAccountId: row.liability_account_id, customPosition: row.custom_position, archived: Boolean(row.archived_at) };
+};
+const goalFromDb = (row, history) => {
+  const ledger = history.filter((item) => item.goal_id === row.id);
+  const contributionTotal = ledger.reduce((sum, item) => sum + (item.contribution_type === "withdrawal" ? -Number(item.amount) : Number(item.amount)), 0);
+  return { id: row.id, type: row.goal_type, name: row.name, targetAmount: Number(row.target_amount), baseAmount: Number(row.base_amount), contributionTotal, deadline: row.deadline, linkedAccountId: row.linked_account_id || "", monthlyContribution: Number(row.monthly_contribution), status: row.status, archived: Boolean(row.archived_at), history: ledger.map((item) => ({ id: item.id, transactionId: item.transaction_id, type: item.contribution_type === "withdrawal" ? "Withdrawal" : "Contribution", amount: Number(item.amount), date: item.contributed_on, source: "Supabase transfer" })) };
+};
 
 export async function loadFinancialData(userId) {
-  const [profileResult, preferenceResult, notificationResult, accountsResult, categoriesResult, contributionsResult, transactionsResult, budgetsResult, debtsResult, goalsResult] = await Promise.all([
+  const [profileResult, preferenceResult, notificationResult, accountsResult, categoriesResult, contributionsResult, transactionsResult, budgetsResult, debtsResult, debtPaymentsResult, goalsResult] = await Promise.all([
     supabase.from("profiles").select("*").eq("id", userId).single(),
     supabase.from("user_preferences").select("*").eq("user_id", userId).single(),
     supabase.from("notification_preferences").select("*").eq("user_id", userId).single(),
@@ -24,12 +31,14 @@ export async function loadFinancialData(userId) {
     supabase.from("transactions").select("*, budget_categories(name)").eq("user_id", userId).order("occurred_on", { ascending: false }).order("occurred_at", { ascending: false }),
     supabase.from("monthly_budgets").select("*, budget_categories(name,group_key)").eq("user_id", userId).order("month", { ascending: false }),
     supabase.from("debts").select("*").eq("user_id", userId).order("created_at"),
+    supabase.from("debt_payments").select("*").eq("user_id", userId).order("paid_on", { ascending: false }),
     supabase.from("goals").select("*").eq("user_id", userId).order("created_at"),
   ]);
   const profile = required(profileResult, "Profile");
   const preferences = required(preferenceResult, "Preferences");
   const notifications = required(notificationResult, "Notifications");
   const contributionRows = required(contributionsResult, "Goal contributions");
+  const debtPaymentRows = required(debtPaymentsResult, "Debt payments");
   const contributionMap = new Map(contributionRows.map((row) => [row.transaction_id, row.goal_id]));
   const goalRows = required(goalsResult, "Goals");
   return {
@@ -37,7 +46,7 @@ export async function loadFinancialData(userId) {
     categories: required(categoriesResult, "Categories").filter((row) => row.kind === "category" && !row.archived_at).map(categoryFromDb),
     transactions: required(transactionsResult, "Transactions").filter((row) => !row.archived_at).map((row) => transactionFromDb(row, contributionMap)),
     budgets: required(budgetsResult, "Budgets").filter((row) => !row.archived_at).map(budgetFromDb),
-    debts: required(debtsResult, "Debts").filter((row) => !row.archived_at).map(debtFromDb),
+    debts: required(debtsResult, "Debts").filter((row) => !row.archived_at).map((row) => debtFromDb(row, debtPaymentRows)),
     goals: goalRows.filter((row) => !row.archived_at).map((row) => goalFromDb(row, contributionRows)),
     settings: {
       profile: { firstName: profile.first_name, lastName: profile.last_name, email: profile.email, photo: profile.avatar_url || "/assets/lina-avatar.png" },
@@ -138,8 +147,12 @@ export async function saveSettings(userId, settings) {
   }
 }
 
-export async function recordDebtPayment(debtId, accountId, amount, date) { required(await supabase.rpc("record_debt_payment", { p_debt_id: debtId, p_account_id: accountId, p_amount: amount, p_paid_on: date }), "Record debt payment"); }
-export async function recordGoalContribution(goalId, accountId, amount, mode, date) { required(await supabase.rpc("record_goal_contribution", { p_goal_id: goalId, p_counterparty_account_id: accountId, p_amount: amount, p_contribution_type: mode === "add" ? "contribution" : "withdrawal", p_contributed_on: date }), "Record goal contribution"); }
+export async function recordDebtPayment(debtId, accountId, amount, date, transactionId) {
+  return required(await supabase.rpc("record_debt_payment", { p_debt_id: debtId, p_account_id: accountId, p_amount: amount, p_paid_on: date, p_transaction_id: transactionId }), "Record debt payment");
+}
+export async function recordGoalContribution(goalId, accountId, amount, mode, date, transactionId) {
+  return required(await supabase.rpc("record_goal_contribution", { p_goal_id: goalId, p_counterparty_account_id: accountId, p_amount: amount, p_contribution_type: mode === "add" ? "contribution" : "withdrawal", p_contributed_on: date, p_transaction_id: transactionId }), "Record goal contribution");
+}
 
 export async function deleteFinancialData(userId) {
   for (const table of ["goal_contributions","debt_payments","transactions","monthly_budgets","goals","debts","accounts"]) {

@@ -57,7 +57,11 @@ import {
 } from "recharts";
 import { AuthGate } from "./components/AuthGate.jsx";
 import { LandingPage } from "./components/LandingPage.jsx";
+import { OnboardingFlow } from "./components/onboarding/OnboardingFlow.jsx";
+import { KalsoonLogo } from "./components/KalsoonLogo.jsx";
+import { AccountsWorkflow } from "./components/accounts/AccountsWorkflow.jsx";
 import { supabase } from "./lib/supabase.js";
+import { loadOnboardingState } from "./lib/onboardingData.js";
 import {
   deleteFinancialData,
   loadFinancialData,
@@ -301,6 +305,8 @@ const formatSignedMoney = (value, currency = "CHF", decimals = 2, zeroSign = "")
 
 const formatSignedCHF = (value, decimals = 0, zeroSign = "") => formatSignedMoney(value, "CHF", decimals, zeroSign);
 const moneyTone = (value) => Number(value) > 0 ? "money-positive" : Number(value) < 0 ? "money-negative" : "money-neutral";
+const formatBudgetCHF = (value) => `CHF ${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(Math.abs(Number(value) || 0))}`;
+const formatBudgetPercentage = (value) => new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(Number(value) || 0);
 
 const accountLabel = (account) => `${account.name}${account.lastFour ? ` •••• ${account.lastFour}` : ""} — ${formatSignedMoney(account.balance, account.currency)}`;
 
@@ -323,23 +329,29 @@ const transactionImpact = (account, transaction, direction = 1) => {
 const applyTransactionToAccounts = (accounts, transaction, direction = 1) =>
   accounts.map((account) => ({ ...account, balance: account.balance + transactionImpact(account, transaction, direction) }));
 
+const transactionFlowKind = (transaction) => transaction.flowKind || (transaction.type === "transfer" ? "transfer" : "regular");
+const isRegularIncomeTransaction = (transaction) => transaction.type === "income" && transactionFlowKind(transaction) === "regular";
+const isSpendingTransaction = (transaction) => transaction.type === "expense" && ["regular", "debt_payment"].includes(transactionFlowKind(transaction));
+
 const getBudgetTransactions = (budget, transactions, month = new Date().toISOString().slice(0, 7)) =>
   transactions.filter((transaction) => {
     if (!transaction.dateValue?.startsWith(month) || transaction.status === "Scheduled") return false;
-    if (budget.group === "savings") return transaction.type === "transfer" && (transaction.merchant.toLowerCase() === budget.category.toLowerCase() || transaction.category === budget.transactionCategory);
-    return transaction.type === "expense" && (transaction.category === budget.transactionCategory || transaction.category === budget.category);
+    if (budget.group === "savings") return transactionFlowKind(transaction) === "goal_contribution" && (transaction.merchant.toLowerCase() === budget.category.toLowerCase() || transaction.category === budget.transactionCategory);
+    return isSpendingTransaction(transaction) && (transaction.category === budget.transactionCategory || transaction.category === budget.category);
   });
 
 const getBudgetActual = (budget, transactions) =>
   getBudgetTransactions(budget, transactions).reduce((sum, transaction) => sum + transaction.amount, 0);
 
+const getBudgetPercentageUsed = (spent, limit) => {
+  const absoluteLimit = Math.abs(Number(limit) || 0);
+  return absoluteLimit > 0 ? (Math.abs(Number(spent) || 0) / absoluteLimit) * 100 : 0;
+};
+
 const getBudgetStatus = (budget, actual) => {
-  const percentage = budget.planned > 0 ? (actual / budget.planned) * 100 : 0;
-  const today = new Date("2026-07-14T12:00:00");
-  const dueDate = new Date(`${budget.dueDate}T12:00:00`);
-  const daysUntilDue = Math.ceil((dueDate - today) / 86400000);
-  if (percentage > 100) return "Overspent";
-  if (budget.reminder && daysUntilDue >= 0 && daysUntilDue <= Number(budget.reminderDays || 3) && percentage < 80) return "Due soon";
+  const percentage = getBudgetPercentageUsed(actual, budget.planned);
+  if (percentage > 100) return "Over budget";
+  if (percentage === 100) return "Reached";
   if (percentage >= 80) return "Nearly reached";
   return "On track";
 };
@@ -401,9 +413,9 @@ const simulateDebtPayoff = (debts, strategy, extraPayment, customOrder = []) => 
   return { months: month, debtFreeDate: schedule.at(-1)?.date || null, totalInterest, totalRepayment, order, schedule, balanceData };
 };
 
-const getGoalTransactions = (goal, transactions) => transactions.filter((transaction) => transaction.type === "transfer" && transaction.status !== "Scheduled" && (transaction.goalId === goal.id || transaction.merchant.toLowerCase() === goal.name.toLowerCase()) && (transaction.toAccountId === goal.linkedAccountId || transaction.fromAccountId === goal.linkedAccountId));
+const getGoalTransactions = (goal, transactions) => transactions.filter((transaction) => ["goal_contribution", "goal_withdrawal"].includes(transactionFlowKind(transaction)) && transaction.status !== "Scheduled" && (transaction.goalId === goal.id || transaction.merchant.toLowerCase() === goal.name.toLowerCase()) && (transaction.toAccountId === goal.linkedAccountId || transaction.fromAccountId === goal.linkedAccountId));
 
-const getGoalCurrentAmount = (goal, transactions) => goal.baseAmount + getGoalTransactions(goal, transactions).reduce((sum, transaction) => sum + (transaction.toAccountId === goal.linkedAccountId ? transaction.amount : -transaction.amount), 0);
+const getGoalCurrentAmount = (goal, transactions) => goal.baseAmount + (Number.isFinite(goal.contributionTotal) ? goal.contributionTotal : getGoalTransactions(goal, transactions).reduce((sum, transaction) => sum + (transaction.toAccountId === goal.linkedAccountId ? transaction.amount : -transaction.amount), 0));
 
 const getGoalCompletionDate = (currentAmount, targetAmount, monthlyContribution) => {
   const remaining = Math.max(0, targetAmount - currentAmount);
@@ -458,13 +470,7 @@ function StatefulDropdown({ initialValue, options, ariaLabel, className = "" }) 
 function Brand() {
   return (
     <button className="brand" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="Kalsoon home">
-      <span className="brand-mark">
-<Coins size={22} weight="bold" />
-</span>
-      <span className="brand-copy">
-<strong>Kalsoon</strong>
-<small>Every franc, with purpose</small>
-</span>
+      <KalsoonLogo />
     </button>
   );
 }
@@ -474,10 +480,10 @@ function Sidebar({ page, onNavigate, expanded, setExpanded, onSignOut }) {
     <aside className={`sidebar ${expanded ? "expanded" : ""}`}>
       <div className="sidebar-brand">
         <Brand />
-        <IconButton label={expanded ? "Collapse navigation" : "Expand navigation"} className="sidebar-toggle" onClick={() => setExpanded((value) => !value)}>
-          <SidebarSimple size={19} />
-        </IconButton>
       </div>
+      <IconButton label={expanded ? "Collapse navigation" : "Expand navigation"} className="sidebar-toggle" onClick={() => setExpanded((value) => !value)}>
+        <SidebarSimple size={18} weight="regular" />
+      </IconButton>
       <nav className="nav-list" aria-label="Main navigation">
         {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
           <button key={id} className={`nav-item ${page === id ? "active" : ""}`} onClick={() => onNavigate(id)} aria-current={page === id ? "page" : undefined}>
@@ -505,7 +511,7 @@ const TOPBAR_NOTIFICATIONS = [
   { id: "goal-update", title: "Goals are ready to track", detail: "Link a savings account to keep goal progress current.", time: "Yesterday", unread: true },
 ];
 
-function Topbar({ onMenu, page, transactionFilter, onTransactionFilterChange, profile = INITIAL_SETTINGS.profile }) {
+function Topbar({ onMenu, onOpenProfile, page, month, onMonthChange, transactionFilter, onTransactionFilterChange, profile = INITIAL_SETTINGS.profile }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState(TOPBAR_NOTIFICATIONS);
   const unreadCount = notifications.filter((notification) => notification.unread).length;
@@ -518,6 +524,7 @@ function Topbar({ onMenu, page, transactionFilter, onTransactionFilterChange, pr
       </button>
       <div className="top-actions">
         {page === "transactions" ? <DropdownControl className="topbar-category-filter" icon={SlidersHorizontal} ariaLabel="Transaction category filter" value={transactionFilter} onChange={onTransactionFilterChange} options={TRANSACTION_FILTERS.map((name) => ({ value: name, label: name === "All" ? "All categories" : name }))}/> : null}
+        {page === "accounts" ? <DropdownControl className="topbar-month-filter" icon={CalendarBlank} ariaLabel="Accounts month" value={month} options={APP_MONTH_OPTIONS} onChange={onMonthChange}/> : null}
         <div className="notification-shell">
         <IconButton label="Notifications" className={`notification-button ${notificationsOpen ? "active" : ""}`} onClick={() => setNotificationsOpen((open) => !open)} aria-expanded={notificationsOpen}>
 <Bell size={20} />
@@ -537,7 +544,7 @@ function Topbar({ onMenu, page, transactionFilter, onTransactionFilterChange, pr
           {notifications.length ? <button type="button" className="notification-clear" onClick={() => setNotifications([])}>Clear all</button> : null}
         </div> : null}
         </div>
-        <button className="profile-button">
+        <button type="button" className="profile-button" onClick={onOpenProfile} aria-label="Open profile settings">
           <img src={profile.photo} alt={`${profile.firstName} ${profile.lastName}`} />
           <span>
 <strong>{profile.firstName} {profile.lastName}</strong>
@@ -674,7 +681,7 @@ function SpendingDonut({ transactions = [] }) {
       <div className="donut-wrap">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
-<Pie data={data} dataKey="value" innerRadius="79%" outerRadius="94%" paddingAngle={2} stroke="none">{data.map((item) => <Cell key={item.name} fill={item.color} />)}</Pie>
+<Pie data={data} dataKey="value" innerRadius="81%" outerRadius="99%" paddingAngle={2} stroke="none">{data.map((item) => <Cell key={item.name} fill={item.color} />)}</Pie>
 </PieChart>
         </ResponsiveContainer>
         <div className="donut-center">
@@ -736,7 +743,7 @@ function BudgetList({ full = false, budgets = [], transactions = [] }) {
       {budgets.length ? budgets.slice(0, full ? budgets.length : 3).map((budget) => {
         const name = budget.category; const Icon = budget.group === "savings" ? Target : budget.group === "fixed" ? Receipt : Wallet;
         const spent = getBudgetActual(budget, transactions); const limit = budget.planned; const color = budget.group === "savings" ? "#168c6b" : "#e45f44";
-        const percentage = Math.round((spent / limit) * 100);
+        const percentage = getBudgetPercentageUsed(spent, limit);
         return (
           <div className="budget-row" key={name}>
             <span className="budget-icon">
@@ -748,10 +755,10 @@ function BudgetList({ full = false, budgets = [], transactions = [] }) {
 <span>{formatCHF(spent)} of {formatCHF(limit)}</span>
 </div>
 <div className="progress-track">
-<span style={{ width: `${percentage}%`, background: color }} />
+<span style={{ width: `${Math.min(100, Math.max(0, percentage))}%`, background: color }} />
 </div>
 </div>
-            <b>{percentage}%</b>
+            <b>{formatBudgetPercentage(percentage)}%</b>
           </div>
         );
       }) : <div className="budget-related-empty">No monthly budgets yet.</div>}
@@ -797,8 +804,8 @@ function ConnectedProgressCard({ type, items, total, completed, onOpen }) {
 function Dashboard({ transactions, accounts, budgets, debts, goals, onNavigate }) {
   const selectedMonth = new Date().toISOString().slice(0, 7);
   const monthly = transactions.filter((transaction) => transaction.dateValue?.startsWith(selectedMonth) && transaction.status !== "Scheduled");
-  const income = monthly.filter((transaction) => transaction.type === "income").reduce((sum, transaction) => sum + transaction.amount, 0);
-  const spending = monthly.filter((transaction) => transaction.type === "expense").reduce((sum, transaction) => sum + transaction.amount, 0);
+  const income = monthly.filter(isRegularIncomeTransaction).reduce((sum, transaction) => sum + transaction.amount, 0);
+  const spending = monthly.filter(isSpendingTransaction).reduce((sum, transaction) => sum + transaction.amount, 0);
   const available = income - spending;
   const netWorth = accounts.filter((account) => !account.archived && account.includeInNetWorth !== false).reduce((sum, account) => sum + account.balance * (FX_TO_CHF[account.currency] || 1), 0);
   const savingsRate = income ? Math.max(0, (available / income) * 100) : 0;
@@ -806,14 +813,14 @@ function Dashboard({ transactions, accounts, budgets, debts, goals, onNavigate }
     const date = new Date(); date.setDate(1); date.setMonth(date.getMonth() - (5 - index));
     const key = date.toISOString().slice(0, 7);
     const rows = transactions.filter((transaction) => transaction.dateValue?.startsWith(key) && transaction.status !== "Scheduled");
-    const monthIncome = rows.filter((item) => item.type === "income").reduce((sum, item) => sum + item.amount, 0);
-    const monthExpense = rows.filter((item) => item.type === "expense").reduce((sum, item) => sum + item.amount, 0);
+    const monthIncome = rows.filter(isRegularIncomeTransaction).reduce((sum, item) => sum + item.amount, 0);
+    const monthExpense = rows.filter(isSpendingTransaction).reduce((sum, item) => sum + item.amount, 0);
     return { month: new Intl.DateTimeFormat("en-GB", { month: "short" }).format(date), income: monthIncome, expense: monthExpense, cash: monthIncome - monthExpense };
   }), [transactions]);
   const debtProgress = useMemo(() => {
-    const total = debts.reduce((sum, debt) => sum + Math.max(debt.originalBalance || debt.balance, debt.balance), 0);
+    const completed = debts.reduce((sum, debt) => sum + Math.max(0, debt.paidAmount ?? ((debt.originalBalance || debt.balance) - debt.balance)), 0);
     const remaining = debts.reduce((sum, debt) => sum + debt.balance, 0);
-    return { total, completed: Math.max(0, total - remaining), items: debts.map((debt) => ({ id: debt.id, name: debt.creditor, current: Math.max(0, (debt.originalBalance || debt.balance) - debt.balance), total: debt.originalBalance || debt.balance, percentage: debt.originalBalance ? Math.round(Math.max(0, 1 - debt.balance / debt.originalBalance) * 100) : 0 })) };
+    return { total: completed + remaining, completed, items: debts.map((debt) => { const paid = Math.max(0, debt.paidAmount ?? ((debt.originalBalance || debt.balance) - debt.balance)); const total = paid + debt.balance; return { id: debt.id, name: debt.creditor, current: paid, total, percentage: total ? Math.round(paid / total * 100) : 0 }; }) };
   }, [debts]);
   const goalsProgress = useMemo(() => {
     const items = goals.map((goal) => { const current = getGoalCurrentAmount(goal, transactions); return { id: goal.id, name: goal.name, current, total: goal.targetAmount, percentage: goal.targetAmount ? Math.round((current / goal.targetAmount) * 100) : 0 }; });
@@ -850,7 +857,7 @@ function Dashboard({ transactions, accounts, budgets, debts, goals, onNavigate }
           <SectionHead title="Spending breakdown" subtitle="July distribution" action={<IconButton label="More options">
 <span className="dots">•••</span>
 </IconButton>} />
-          <SpendingDonut transactions={monthly.filter((transaction) => transaction.type === "expense")} />
+          <SpendingDonut transactions={monthly.filter(isSpendingTransaction)} />
         </Card>
         <Card className="transactions-card">
           <SectionHead title="Latest transactions" subtitle="Your most recent activity" action={<button className="text-button" onClick={() => onNavigate("transactions")}>View all <ArrowRight size={15} />
@@ -1274,7 +1281,7 @@ function Transactions({ transactions, accounts, query, setQuery, filter, setFilt
       return matchesSearch && matchesFilter && matchesMonth;
     });
   }, [transactions, accounts, filter, month, query]);
-  const totals = useMemo(() => filtered.reduce((summary, transaction) => { if (transaction.type === "income") summary.income += transaction.amount; if (transaction.type === "expense") summary.expense += transaction.amount; if (transaction.type === "transfer") summary.transfers += 1; return summary; }, { income: 0, expense: 0, transfers: 0 }), [filtered]);
+  const totals = useMemo(() => filtered.reduce((summary, transaction) => { if (isRegularIncomeTransaction(transaction)) summary.income += transaction.amount; if (isSpendingTransaction(transaction)) summary.expense += transaction.amount; if (transaction.type === "transfer") summary.transfers += 1; return summary; }, { income: 0, expense: 0, transfers: 0 }), [filtered]);
   const exportCsv = () => {
     if (!filtered.length) return;
     const quote = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
@@ -1303,6 +1310,9 @@ function Transactions({ transactions, accounts, query, setQuery, filter, setFilt
 <DropdownControl className="month-dropdown" icon={CalendarBlank} ariaLabel="Transaction month" value={month} onChange={setMonth} options={TRANSACTION_MONTH_OPTIONS}/>
 <button className="secondary-button export-button" disabled={!filtered.length} onClick={exportCsv}>
 <DownloadSimple size={17}/>Export</button>
+<button type="button" className="add-transaction transaction-toolbar-add" onClick={onAdd}>
+<Plus size={17}/><span>Add transaction</span>
+</button>
 </div>
       <div className="transaction-insight">
 <span className="insight-icon">
@@ -1438,7 +1448,7 @@ function BudgetDetailsModal({ budget, transactions, onClose, onEdit, onDelete })
   const largest = [...related].sort((a, b) => b.amount - a.amount).slice(0, 3);
   const actual = related.reduce((sum, transaction) => sum + transaction.amount, 0);
   const remaining = budget.planned - actual;
-  const percentage = budget.planned ? Math.round((actual / budget.planned) * 100) : 0;
+  const percentage = getBudgetPercentageUsed(actual, budget.planned);
   const status = getBudgetStatus(budget, actual);
   const group = BUDGET_GROUPS[budget.group];
   const GroupIcon = group.icon;
@@ -1472,10 +1482,10 @@ function BudgetDetailsModal({ budget, transactions, onClose, onEdit, onDelete })
 <GroupIcon size={21}/>
 </span>
 <span className={`budget-status ${status.toLowerCase().replaceAll(" ", "-")}`}>{status}</span>
-<strong className="money-negative">{formatSignedCHF(-actual)} <small>of {formatCHF(budget.planned)}</small>
+<strong>{formatBudgetPercentage(percentage)}% used <small>{formatBudgetCHF(actual)} / {formatBudgetCHF(budget.planned)}</small>
 </strong>
 <div className="progress-track">
-<span style={{ width: `${Math.min(100, percentage)}%` }}/>
+<span className={status === "Over budget" ? "over-budget" : ""} style={{ width: `${Math.min(100, Math.max(0, percentage))}%` }}/>
 </div>
 <p className={moneyTone(remaining)}>{formatSignedCHF(remaining)} {remaining < 0 ? "over plan" : "remaining"}</p>
 </div>
@@ -1525,10 +1535,11 @@ function BudgetPage({ budgets, setBudgets, customCategories, setCustomCategories
   const [editor, setEditor] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [notice, setNotice] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState({});
   const selected = budgets.find((budget) => budget.id === selectedId);
-  const expectedIncome = useMemo(() => transactions.filter((transaction) => transaction.type === "income" && transaction.dateValue?.startsWith("2026-07") && transaction.status !== "Scheduled").reduce((sum, transaction) => sum + transaction.amount, 0), [transactions]);
+  const expectedIncome = useMemo(() => transactions.filter((transaction) => isRegularIncomeTransaction(transaction) && transaction.dateValue?.startsWith("2026-07") && transaction.status !== "Scheduled").reduce((sum, transaction) => sum + transaction.amount, 0), [transactions]);
   const plannedSpending = useMemo(() => budgets.filter((budget) => budget.group !== "savings").reduce((sum, budget) => sum + budget.planned, 0), [budgets]);
-  const actualSpending = useMemo(() => transactions.filter((transaction) => transaction.type === "expense" && transaction.dateValue?.startsWith("2026-07") && transaction.status !== "Scheduled").reduce((sum, transaction) => sum + transaction.amount, 0), [transactions]);
+  const actualSpending = useMemo(() => transactions.filter((transaction) => isSpendingTransaction(transaction) && transaction.dateValue?.startsWith("2026-07") && transaction.status !== "Scheduled").reduce((sum, transaction) => sum + transaction.amount, 0), [transactions]);
   const expectedSavings = expectedIncome - plannedSpending;
   const save = (budget) => { const existing = budgets.find((item) => item.id === budget.id); setBudgets((current) => existing ? current.map((item) => item.id === budget.id ? budget : item) : [...current, budget]); if (budget.custom) setCustomCategories((current) => { const next = Object.fromEntries(Object.entries(current).map(([group, categories]) => [group, existing?.custom && existing.group !== budget.group && group === existing.group ? categories.filter((category) => category !== existing.category) : [...categories]])); if (!next[budget.group].some((category) => category.toLowerCase() === budget.category.toLowerCase())) next[budget.group] = [...next[budget.group], budget.category]; return next; }); setEditor(null); setNotice(`${budget.category} was ${existing ? "updated" : "added"} and saved.`); };
   const remove = (id) => { const name = budgets.find((budget) => budget.id === id)?.category; setBudgets((current) => current.filter((budget) => budget.id !== id)); setSelectedId(null); setNotice(`${name || "Budget"} was deleted.`); };
@@ -1569,8 +1580,8 @@ function BudgetPage({ budgets, setBudgets, customCategories, setCustomCategories
 <button className="primary-button" onClick={() => setEditor({ group: "fixed" })}>
 <Plus size={16}/>Create budget</button>
 </div>
-<div className="budget-groups">{Object.entries(BUDGET_GROUPS).map(([groupId, group]) => { const GroupIcon = group.icon; const items = budgets.filter((budget) => budget.group === groupId); const groupPlanned = items.reduce((sum, budget) => sum + budget.planned, 0); const groupActual = items.reduce((sum, budget) => sum + getBudgetActual(budget, transactions), 0); return <Card className="budget-group-card" key={groupId}>
-<div className="budget-group-head">
+<div className="budget-groups">{Object.entries(BUDGET_GROUPS).map(([groupId, group]) => { const GroupIcon = group.icon; const items = budgets.filter((budget) => budget.group === groupId); const groupPlanned = items.reduce((sum, budget) => sum + budget.planned, 0); const groupActual = items.reduce((sum, budget) => sum + getBudgetActual(budget, transactions), 0); const isCollapsed = Boolean(collapsedGroups[groupId]); return <Card className="budget-group-card" key={groupId}>
+<button type="button" className={`budget-group-head budget-group-toggle ${isCollapsed ? "collapsed" : ""}`} aria-expanded={!isCollapsed} aria-controls={`budget-group-${groupId}`} onClick={() => setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }))}>
 <span className={`budget-group-icon ${group.tone}`}>
 <GroupIcon size={20}/>
 </span>
@@ -1582,18 +1593,19 @@ function BudgetPage({ budgets, setBudgets, customCategories, setCustomCategories
 <span className={moneyTone(groupId === "savings" ? groupActual : -groupActual)}>{formatSignedCHF(groupId === "savings" ? groupActual : -groupActual)} actual</span>
 <strong className={moneyTone(groupId === "savings" ? groupPlanned : -groupPlanned)}>{formatSignedCHF(groupId === "savings" ? groupPlanned : -groupPlanned)} planned</strong>
 </div>
-</div>
-<div className="budget-items">{items.length ? items.map((budget) => { const actual = getBudgetActual(budget, transactions); const remaining = budget.planned - actual; const percentage = budget.planned ? Math.round((actual / budget.planned) * 100) : 0; const status = getBudgetStatus(budget, actual); return <button type="button" className="budget-item" key={budget.id} onClick={() => setSelectedId(budget.id)}>
+<CaretDown className="budget-group-caret" size={18}/>
+</button>
+{!isCollapsed ? <div className="budget-items" id={`budget-group-${groupId}`}>{items.length ? items.map((budget) => { const actual = getBudgetActual(budget, transactions); const percentage = getBudgetPercentageUsed(actual, budget.planned); const status = getBudgetStatus(budget, actual); return <button type="button" className="budget-item" key={budget.id} onClick={() => setSelectedId(budget.id)}>
 <span className="budget-category-icon">{budget.category.slice(0, 1).toUpperCase()}</span>
 <div className="budget-item-main">
 <div>
 <strong>{budget.category}{budget.custom ? <em>Custom</em> : null}</strong>
-<span><b className={moneyTone(budget.group === "savings" ? actual : -actual)}>{formatSignedCHF(budget.group === "savings" ? actual : -actual)}</b> of <b className={moneyTone(budget.group === "savings" ? budget.planned : -budget.planned)}>{formatSignedCHF(budget.group === "savings" ? budget.planned : -budget.planned)}</b></span>
+<span className="budget-percentage-used">{formatBudgetPercentage(percentage)}% used</span>
 </div>
 <div className="progress-track">
-<span className={status === "Overspent" ? "overspent" : ""} style={{ width: `${Math.min(100, percentage)}%` }}/>
+<span className={status === "Over budget" ? "over-budget" : ""} style={{ width: `${Math.min(100, Math.max(0, percentage))}%` }}/>
 </div>
-<small><b className={moneyTone(remaining)}>{formatSignedCHF(remaining)}</b> {remaining < 0 ? "over" : "remaining"} · {budget.frequency}</small>
+<small className="budget-amount-line"><span>{formatBudgetCHF(actual)} / {formatBudgetCHF(budget.planned)}</span>{percentage > 100 ? <em>{formatBudgetPercentage(percentage - 100)}% over</em> : null}</small>
 </div>
 <span className={`budget-status ${status.toLowerCase().replaceAll(" ", "-")}`}>{status}</span>
 <ArrowRight size={17}/>
@@ -1601,7 +1613,7 @@ function BudgetPage({ budgets, setBudgets, customCategories, setCustomCategories
 <p>No budgets in this group yet.</p>
 <button className="secondary-button" onClick={() => setEditor({ group: groupId })}>
 <Plus size={14}/>Add one</button>
-</div>}</div>
+</div>}</div> : null}
 </Card>; })}</div>{editor ? <BudgetModal budget={editor.budget} initialGroup={editor.group} customCategories={customCategories} onClose={() => setEditor(null)} onSave={save}/> : null}{selected ? <BudgetDetailsModal budget={selected} transactions={transactions} onClose={() => setSelectedId(null)} onEdit={(budget) => { setSelectedId(null); setEditor({ budget, group: budget.group }); }} onDelete={remove}/> : null}</>;
 }
 
@@ -1680,11 +1692,24 @@ function DebtModal({ debt, onClose, onSave }) {
 function DebtDetailsModal({ debt, accounts, onClose, onEdit, onDelete, onConfirmPayment }) {
   const [paymentMode, setPaymentMode] = useState(false);
   const [amount, setAmount] = useState("");
-  const [accountId, setAccountId] = useState(accounts[0]?.id || "");
+  const [accountId, setAccountId] = useState("");
   const [date, setDate] = useState("2026-07-14");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const submitPayment = (event) => { event.preventDefault(); const value = Number(amount); if (!(value > 0) || value > debt.balance) { setError(`Enter an amount up to ${formatCHF(debt.balance)}.`); return; } if (!accountId || !date) { setError("Choose an account and payment date."); return; } setSaving(true); window.setTimeout(() => onConfirmPayment(debt, value, accountId, date), 500); };
+  const operationIdRef = useRef(crypto.randomUUID());
+  const sourceAccounts = accounts.filter((account) => !account.archived && account.type !== "liability");
+  const sourceAccount = sourceAccounts.find((account) => account.id === accountId);
+  const submitPayment = async (event) => {
+    event.preventDefault();
+    const value = Number(amount);
+    if (!(value > 0) || value > debt.balance) { setError(`Enter an amount up to ${formatCHF(debt.balance)}.`); return; }
+    if (!sourceAccount || !date) { setError("Choose a source account and payment date."); return; }
+    if (sourceAccount.balance < value) { setError(`${sourceAccount.name} has ${formatMoney(sourceAccount.balance, sourceAccount.currency)} available.`); return; }
+    setSaving(true);
+    setError("");
+    try { await onConfirmPayment(debt, value, accountId, date, operationIdRef.current); }
+    catch (saveError) { setError(saveError.message || "The payment could not be recorded."); setSaving(false); }
+  };
   return <div className="modal-backdrop">
 <div className="modal debt-detail-modal" role="dialog" aria-modal="true" aria-labelledby="debt-detail-title">
 <div className="modal-head">
@@ -1709,12 +1734,20 @@ function DebtDetailsModal({ debt, accounts, onClose, onEdit, onDelete, onConfirm
 </label>
 <label>
 <span>Pay from</span>
-<select value={accountId} onChange={(event) => setAccountId(event.target.value)}>{accounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
+<select value={accountId} onChange={(event) => { setAccountId(event.target.value); setError(""); }}><option value="">Choose source account</option>{sourceAccounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
 </label>
 <label>
 <span>Payment date</span>
-<input type="date" value={date} onChange={(event) => setDate(event.target.value)}/>
+<input type="date" value={date} onChange={(event) => { setDate(event.target.value); setError(""); }}/>
 </label>
+<div className="financial-transfer-summary" aria-label="Debt payment summary">
+<span>Transaction summary</span>
+<div><small>From</small><strong>{sourceAccount?.name || "Choose an account"}</strong></div>
+<ArrowRight size={17}/>
+<div><small>Debt</small><strong>{debt.creditor}</strong></div>
+<b className="money-negative">{formatSignedMoney(-(Number(amount) || 0), sourceAccount?.currency || "CHF")}</b>
+<p>One expense transaction will reduce both the source account and the remaining debt.</p>
+</div>
 <FieldError>{error}</FieldError>
 <div className="modal-actions">
 <button type="button" className="secondary-button" onClick={() => setPaymentMode(false)}>Back</button>
@@ -1776,7 +1809,7 @@ function DebtPage({ debts, setDebts, accounts, onConfirmedPayment }) {
   const moveCustom = (index, direction) => setCustomOrder((current) => { const next = [...current]; const target = index + direction; if (target < 0 || target >= next.length) return current; [next[index], next[target]] = [next[target], next[index]]; return next; });
   const saveDebt = (debt) => { const exists = debts.some((item) => item.id === debt.id); setDebts((current) => exists ? current.map((item) => item.id === debt.id ? debt : item) : [...current, debt]); setEditor(null); setNotice(`${debt.creditor} was ${exists ? "updated" : "added"}.`); };
   const deleteDebt = (id) => { const name = debts.find((debt) => debt.id === id)?.creditor; setDebts((current) => current.filter((debt) => debt.id !== id)); setSelectedId(null); setNotice(`${name} was deleted.`); };
-  const confirmPayment = (debt, amount, accountId, date) => { onConfirmedPayment(debt, amount, accountId, date); setSelectedId(null); setNotice(`${formatCHF(amount)} payment to ${debt.creditor} is being confirmed.`); };
+  const confirmPayment = async (debt, amount, accountId, date, transactionId) => { await onConfirmedPayment(debt, amount, accountId, date, transactionId); setSelectedId(null); setNotice(`${formatCHF(amount)} payment to ${debt.creditor} was recorded.`); };
   const strategyCopy = { snowball: ["Debt Snowball", "Smallest balance first"], avalanche: ["Debt Avalanche", "Highest interest first"], custom: ["Custom plan", "Choose your repayment order"] };
   return <>{notice ? <div className="account-notice" role="status">
 <CheckCircle size={18} weight="fill"/>
@@ -1915,12 +1948,13 @@ function DebtPage({ debts, setDebts, accounts, onConfirmedPayment }) {
 }
 
 function GoalModal({ goal, accounts, onClose, onSave }) {
-  const [form, setForm] = useState({ type: goal?.type || "Emergency fund", name: goal?.name || "", targetAmount: goal ? String(goal.targetAmount) : "", currentAmount: goal ? String(goal.baseAmount) : "", deadline: goal?.deadline || "2026-12-31", linkedAccountId: goal?.linkedAccountId || accounts.find((account) => account.type === "savings")?.id || accounts[0]?.id || "", monthlyContribution: goal ? String(goal.monthlyContribution) : "" });
+  const eligibleGoalAccounts = accounts.filter((account) => !account.archived && ["savings", "investment", "pillar"].includes(account.type));
+  const [form, setForm] = useState({ type: goal?.type || "Emergency fund", name: goal?.name || "", targetAmount: goal ? String(goal.targetAmount) : "", currentAmount: goal ? String(goal.baseAmount) : "", deadline: goal?.deadline || "2026-12-31", linkedAccountId: goal?.linkedAccountId || eligibleGoalAccounts[0]?.id || "", monthlyContribution: goal ? String(goal.monthlyContribution) : "" });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const update = (field, value) => { setForm((current) => ({ ...current, [field]: value })); setErrors((current) => ({ ...current, [field]: "" })); };
   const chooseType = (type) => setForm((current) => ({ ...current, type, name: type === "Custom goal" ? current.name : type }));
-  const submit = (event) => { event.preventDefault(); const nextErrors = {}; if (!form.name.trim()) nextErrors.name = "Enter a goal name."; if (!(Number(form.targetAmount) > 0)) nextErrors.targetAmount = "Enter a target greater than zero."; if (!(Number(form.currentAmount) >= 0)) nextErrors.currentAmount = "Enter a current amount of zero or more."; if (Number(form.currentAmount) > Number(form.targetAmount)) nextErrors.currentAmount = "Current amount cannot exceed the target."; if (!form.deadline) nextErrors.deadline = "Choose a deadline."; if (!form.linkedAccountId) nextErrors.linkedAccountId = "Choose a linked account."; if (!(Number(form.monthlyContribution) >= 0)) nextErrors.monthlyContribution = "Enter a monthly contribution."; setErrors(nextErrors); if (Object.keys(nextErrors).length) return; setSaving(true); window.setTimeout(() => onSave({ id: goal?.id || crypto.randomUUID(), type: form.type, name: form.name.trim(), targetAmount: Number(form.targetAmount), baseAmount: Number(form.currentAmount), deadline: form.deadline, linkedAccountId: form.linkedAccountId, monthlyContribution: Number(form.monthlyContribution), status: goal?.status || "Active", history: goal?.history || [] }), 500); };
+  const submit = (event) => { event.preventDefault(); const nextErrors = {}; if (!form.name.trim()) nextErrors.name = "Enter a goal name."; if (!(Number(form.targetAmount) > 0)) nextErrors.targetAmount = "Enter a target greater than zero."; if (!(Number(form.currentAmount) >= 0)) nextErrors.currentAmount = "Enter a current amount of zero or more."; if (Number(form.currentAmount) > Number(form.targetAmount)) nextErrors.currentAmount = "Current amount cannot exceed the target."; if (!form.deadline) nextErrors.deadline = "Choose a deadline."; if (!form.linkedAccountId || !eligibleGoalAccounts.some((account) => account.id === form.linkedAccountId)) nextErrors.linkedAccountId = "Choose a savings, investment, or Pillar 3a account."; if (!(Number(form.monthlyContribution) >= 0)) nextErrors.monthlyContribution = "Enter a monthly contribution."; setErrors(nextErrors); if (Object.keys(nextErrors).length) return; setSaving(true); window.setTimeout(() => onSave({ id: goal?.id || crypto.randomUUID(), type: form.type, name: form.name.trim(), targetAmount: Number(form.targetAmount), baseAmount: Number(form.currentAmount), deadline: form.deadline, linkedAccountId: form.linkedAccountId, monthlyContribution: Number(form.monthlyContribution), status: goal?.status || "Active", history: goal?.history || [] }), 500); };
   return <div className="modal-backdrop">
 <form className="modal goal-modal" onSubmit={submit} aria-labelledby="goal-modal-title">
 <div className="modal-head">
@@ -1967,7 +2001,7 @@ function GoalModal({ goal, accounts, onClose, onSave }) {
 <label>
 <span>Linked account</span>
 <select value={form.linkedAccountId} onChange={(event) => update("linkedAccountId", event.target.value)}>
-<option value="">Choose account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
+<option value="">Choose savings account</option>{eligibleGoalAccounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
 <FieldError>{errors.linkedAccountId}</FieldError>
 </label>
 </div>
@@ -1994,18 +2028,38 @@ function GoalDetailsModal({ goal, currentAmount, transactions, accounts, onClose
   const [simDeadline, setSimDeadline] = useState(goal.deadline);
   const [transferMode, setTransferMode] = useState(null);
   const [amount, setAmount] = useState("");
-  const [accountId, setAccountId] = useState(accounts.find((account) => account.id !== goal.linkedAccountId)?.id || "");
+  const [accountId, setAccountId] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const operationIdRef = useRef(crypto.randomUUID());
+  const linkedAccount = accounts.find((account) => account.id === goal.linkedAccountId && !account.archived);
+  const counterpartyAccounts = accounts.filter((account) => !account.archived && account.type !== "liability" && account.id !== goal.linkedAccountId && (!linkedAccount || account.currency === linkedAccount.currency));
+  const counterpartyAccount = counterpartyAccounts.find((account) => account.id === accountId);
   const linked = getGoalTransactions(goal, transactions).map((transaction) => ({ id: transaction.id, type: transaction.toAccountId === goal.linkedAccountId ? "Contribution" : "Withdrawal", amount: transaction.amount, date: transaction.dateValue, source: transaction.notes || "Linked account transfer" }));
-  const history = [...linked, ...goal.history].sort((a, b) => b.date.localeCompare(a.date));
+  const history = (Number.isFinite(goal.contributionTotal) ? goal.history : [...linked, ...goal.history]).sort((a, b) => b.date.localeCompare(a.date));
   const completion = getGoalCompletionDate(currentAmount, goal.targetAmount, simContribution);
   const deadlineDate = new Date(`${simDeadline}T12:00:00`);
   const monthsToDeadline = Math.max(1, (deadlineDate.getFullYear() - 2026) * 12 + deadlineDate.getMonth() - 6);
   const requiredMonthly = Math.ceil(Math.max(0, goal.targetAmount - currentAmount) / monthsToDeadline);
-  const chartData = [...goal.history].sort((a, b) => a.date.localeCompare(b.date)).map((item) => ({ month: new Intl.DateTimeFormat("en-GB", { month: "short" }).format(new Date(`${item.date}T12:00:00`)), balance: item.balance }));
+  let runningGoalBalance = goal.baseAmount;
+  const chartData = [...history].sort((a, b) => a.date.localeCompare(b.date)).map((item) => { runningGoalBalance = Number.isFinite(item.balance) ? item.balance : runningGoalBalance + (item.type === "Withdrawal" ? -item.amount : item.amount); return { month: new Intl.DateTimeFormat("en-GB", { month: "short" }).format(new Date(`${item.date}T12:00:00`)), balance: runningGoalBalance }; });
   chartData.push({ month: "Now", balance: currentAmount });
-  const submitTransfer = (event) => { event.preventDefault(); const value = Number(amount); const max = transferMode === "withdraw" ? currentAmount : Infinity; if (!(value > 0) || value > max) { setError(transferMode === "withdraw" ? `Enter an amount up to ${formatCHF(currentAmount)}.` : "Enter an amount greater than zero."); return; } if (!accountId) { setError("Choose an account."); return; } setSaving(true); window.setTimeout(() => onTransfer(goal, transferMode, value, accountId), 500); };
+  const beginTransfer = (mode) => { operationIdRef.current = crypto.randomUUID(); setTransferMode(mode); setAmount(""); setAccountId(""); setError(""); setSaving(false); };
+  const submitTransfer = async (event) => {
+    event.preventDefault();
+    const value = Number(amount);
+    const max = transferMode === "withdraw" ? currentAmount : Infinity;
+    if (!linkedAccount) { setError("Link this goal to a savings account before moving money."); return; }
+    if (!["savings", "investment", "pillar"].includes(linkedAccount.type)) { setError("The linked destination must be a savings, investment, or Pillar 3a account."); return; }
+    if (!(value > 0) || value > max) { setError(transferMode === "withdraw" ? `Enter an amount up to ${formatCHF(currentAmount)}.` : "Enter an amount greater than zero."); return; }
+    if (!counterpartyAccount) { setError(`Choose ${transferMode === "add" ? "a source" : "a destination"} account.`); return; }
+    if (transferMode === "add" && counterpartyAccount.balance < value) { setError(`${counterpartyAccount.name} has ${formatMoney(counterpartyAccount.balance, counterpartyAccount.currency)} available.`); return; }
+    if (transferMode === "withdraw" && linkedAccount.balance < value) { setError(`${linkedAccount.name} has ${formatMoney(linkedAccount.balance, linkedAccount.currency)} available.`); return; }
+    setSaving(true);
+    setError("");
+    try { await onTransfer(goal, transferMode, value, accountId, operationIdRef.current); }
+    catch (saveError) { setError(saveError.message || "The goal transfer could not be recorded."); setSaving(false); }
+  };
   return <div className="modal-backdrop">
 <div className="modal goal-detail-modal" role="dialog" aria-modal="true" aria-labelledby="goal-detail-title">
 <div className="modal-head">
@@ -2021,6 +2075,7 @@ function GoalDetailsModal({ goal, currentAmount, transactions, accounts, onClose
 <Coins size={18}/>
 <p>{transferMode === "add" ? "Money will move from the selected account into the linked goal account." : "Money will move from the linked goal account into the selected account."}</p>
 </div>
+<div className="linked-transfer-account"><span>Linked savings account</span><strong>{linkedAccount ? accountLabel(linkedAccount) : "No eligible account linked"}</strong></div>
 <label>
 <span>Amount</span>
 <div className="amount-input">
@@ -2030,8 +2085,16 @@ function GoalDetailsModal({ goal, currentAmount, transactions, accounts, onClose
 </label>
 <label>
 <span>{transferMode === "add" ? "From account" : "To account"}</span>
-<select value={accountId} onChange={(event) => setAccountId(event.target.value)}>{accounts.filter((account) => account.id !== goal.linkedAccountId).map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
+<select value={accountId} onChange={(event) => { setAccountId(event.target.value); setError(""); }}><option value="">Choose {transferMode === "add" ? "source" : "destination"} account</option>{counterpartyAccounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
 </label>
+<div className="financial-transfer-summary" aria-label="Goal transfer summary">
+<span>Transaction summary</span>
+<div><small>From</small><strong>{transferMode === "add" ? counterpartyAccount?.name || "Choose an account" : linkedAccount?.name || "Linked account"}</strong></div>
+<ArrowRight size={17}/>
+<div><small>To</small><strong>{transferMode === "add" ? linkedAccount?.name || "Linked account" : counterpartyAccount?.name || "Choose an account"}</strong></div>
+<b className="money-neutral">{formatMoney(Number(amount) || 0, linkedAccount?.currency || "CHF")}</b>
+<p>This transfer updates both accounts and goal progress without changing income or spending.</p>
+</div>
 <FieldError>{error}</FieldError>
 <div className="modal-actions">
 <button type="button" className="secondary-button" onClick={() => setTransferMode(null)}>Back</button>
@@ -2054,9 +2117,9 @@ function GoalDetailsModal({ goal, currentAmount, transactions, accounts, onClose
 <p>{formatCHF(Math.max(0, goal.targetAmount - currentAmount))} remaining · {goal.status}</p>
 </div>
 <div className="goal-action-row">
-<button className="secondary-button" onClick={() => setTransferMode("withdraw")}>
+<button className="secondary-button" onClick={() => beginTransfer("withdraw")}>
 <ArrowDown size={15}/>Withdraw</button>
-<button className="primary-button" onClick={() => setTransferMode("add")}>
+<button className="primary-button" onClick={() => beginTransfer("add")}>
 <Plus size={15}/>Add money</button>
 </div>
 <div className="goal-simulator">
@@ -2136,7 +2199,11 @@ function GoalsPage({ goals, setGoals, transactions, accounts, onGoalTransfer }) 
   const saveGoal = (goal) => { const exists = goals.some((item) => item.id === goal.id); setGoals((current) => exists ? current.map((item) => item.id === goal.id ? goal : item) : [...current, goal]); setEditor(null); setNotice(`${goal.name} was ${exists ? "updated" : "created"}.`); };
   const deleteGoal = (id) => { const name = goals.find((goal) => goal.id === id)?.name; setGoals((current) => current.filter((goal) => goal.id !== id)); setSelectedId(null); setNotice(`${name} was deleted.`); };
   const pauseGoal = (id) => setGoals((current) => current.map((goal) => goal.id === id ? { ...goal, status: goal.status === "Paused" ? "Active" : "Paused" } : goal));
-  const transfer = (goal, mode, amount, accountId) => { onGoalTransfer(goal, mode, amount, accountId); setSelectedId(null); setNotice(`${formatCHF(amount)} was ${mode === "add" ? "added to" : "withdrawn from"} ${goal.name}.`); };
+  const transfer = async (goal, mode, amount, accountId, transactionId) => {
+    await onGoalTransfer(goal, mode, amount, accountId, transactionId);
+    setSelectedId(null);
+    setNotice(`${formatCHF(amount)} was ${mode === "add" ? "added to" : "withdrawn from"} ${goal.name}.`);
+  };
   return <>{notice ? <div className="account-notice" role="status">
 <CheckCircle size={18} weight="fill"/>
 <span>{notice}</span>
@@ -2193,13 +2260,13 @@ function GoalsPage({ goals, setGoals, transactions, accounts, onGoalTransfer }) 
 function ReportsPage({ transactions }) {
   const settled = transactions.filter((item) => item.status !== "Scheduled");
   const months = [...new Set(settled.map((item) => item.dateValue?.slice(0,7)).filter(Boolean))];
-  const expenses = settled.filter((item) => item.type === "expense");
+  const expenses = settled.filter(isSpendingTransaction);
   const totalExpense = expenses.reduce((sum,item) => sum + item.amount, 0);
-  const totalIncome = settled.filter((item) => item.type === "income").reduce((sum,item) => sum + item.amount, 0);
+  const totalIncome = settled.filter(isRegularIncomeTransaction).reduce((sum,item) => sum + item.amount, 0);
   const averageSpend = months.length ? totalExpense / months.length : 0;
   const averageSaved = months.length ? (totalIncome - totalExpense) / months.length : 0;
   const categories = Object.entries(expenses.reduce((result,item) => ({ ...result, [item.category]: (result[item.category] || 0) + item.amount }), {})).sort((a,b) => b[1]-a[1]);
-  const series = Array.from({length:7},(_,index) => { const date=new Date(); date.setDate(1); date.setMonth(date.getMonth()-(6-index)); const key=date.toISOString().slice(0,7); const rows=settled.filter((item)=>item.dateValue?.startsWith(key)); const income=rows.filter((item)=>item.type==="income").reduce((sum,item)=>sum+item.amount,0); const expense=rows.filter((item)=>item.type==="expense").reduce((sum,item)=>sum+item.amount,0); return {month:new Intl.DateTimeFormat("en-GB",{month:"short"}).format(date),income,expense,cash:income-expense}; });
+  const series = Array.from({length:7},(_,index) => { const date=new Date(); date.setDate(1); date.setMonth(date.getMonth()-(6-index)); const key=date.toISOString().slice(0,7); const rows=settled.filter((item)=>item.dateValue?.startsWith(key)); const income=rows.filter(isRegularIncomeTransaction).reduce((sum,item)=>sum+item.amount,0); const expense=rows.filter(isSpendingTransaction).reduce((sum,item)=>sum+item.amount,0); return {month:new Intl.DateTimeFormat("en-GB",{month:"short"}).format(date),income,expense,cash:income-expense}; });
   return <><div className="report-stats"><Card><span>Average monthly spend</span><strong className={moneyTone(-averageSpend)}>{formatSignedCHF(-averageSpend)}</strong><small>From connected transactions</small></Card><Card><span>Average saved</span><strong className={moneyTone(averageSaved)}>{formatSignedCHF(averageSaved)}</strong><small>Income minus spending</small></Card><Card><span>Top category</span><strong>{categories[0]?.[0] || "No spending yet"}</strong><small>{totalExpense && categories[0] ? Math.round(categories[0][1]/totalExpense*100) : 0}% of spending</small></Card></div><Card className="wide-card"><SectionHead title="Spending trend" subtitle="Last seven months" action={<StatefulDropdown initialValue="year" options={REPORT_RANGE_OPTIONS} ariaLabel="Report period" className="chart-period-dropdown"/>}/><div className="large-chart"><IncomeExpenseChart data={series}/></div></Card><div className="report-grid"><Card><SectionHead title="By category" subtitle="Share of total spending"/><SpendingDonut transactions={expenses}/></Card><Card><SectionHead title="Category share" subtitle="Largest spending areas"/><div className="change-list">{categories.slice(0,4).map(([name,amount])=><div key={name}><span>{name}</span><b>{totalExpense ? Math.round(amount/totalExpense*100) : 0}%</b></div>)}</div></Card></div></>;
 }
 
@@ -2646,15 +2713,18 @@ function Toggle({label,description,value,setValue}){return <div className="toggl
 </button>
 </div>}
 
-function TransactionModal({ accounts, transaction, categories, onClose, onSave, onViewTransactions }) {
+function TransactionModal({ accounts, transaction, initialAccountId, categories, onClose, onSave, onViewTransactions }) {
   const initialType = transaction?.type || "expense";
+  const availableAccounts = accounts.filter((account) => !account.archived && account.type !== "liability");
   const categoriesForType = (type) => type === "transfer" ? ["Transfer"] : type === "income" ? categories.filter((category) => category.group === "income").map((category) => category.name) : categories.filter((category) => category.group === "fixed" || category.group === "flexible").map((category) => category.name);
-  const firstAccount = accounts[0]?.id || "";
-  const secondAccount = accounts.find((account) => account.id !== firstAccount)?.id || "";
-  const [form, setForm] = useState({ type: initialType, accountId: transaction?.accountId || firstAccount, fromAccountId: transaction?.fromAccountId || firstAccount, toAccountId: transaction?.toAccountId || secondAccount, amount: transaction ? String(transaction.amount) : "", merchant: transaction?.merchant || "", category: transaction?.category || categoriesForType(initialType)[0] || "Other", dateValue: transaction?.dateValue || "2026-07-14", timeValue: transaction?.timeValue || "12:00", status: transaction?.status || "Cleared", notes: transaction?.notes || "", recurring: transaction?.recurring || false, frequency: transaction?.frequency || "Monthly" });
+  const firstAccount = availableAccounts[0]?.id || "";
+  const secondAccount = availableAccounts.find((account) => account.id !== firstAccount)?.id || "";
+  const preferredAccount = availableAccounts.some((account) => account.id === initialAccountId) ? initialAccountId : firstAccount;
+  const [form, setForm] = useState({ type: initialType, accountId: transaction?.accountId || preferredAccount, fromAccountId: transaction?.fromAccountId || preferredAccount, toAccountId: transaction?.toAccountId || availableAccounts.find((account) => account.id !== preferredAccount)?.id || secondAccount, amount: transaction ? String(transaction.amount) : "", merchant: transaction?.merchant || "", category: transaction?.category || categoriesForType(initialType)[0] || "Other", dateValue: transaction?.dateValue || "2026-07-14", timeValue: transaction?.timeValue || "12:00", status: transaction?.status || "Cleared", notes: transaction?.notes || "", recurring: transaction?.recurring || false, frequency: transaction?.frequency || "Monthly" });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(null);
+  const operationIdRef = useRef(transaction?.id || crypto.randomUUID());
   const isEditing = Boolean(transaction);
   const update = (field, value) => { setForm((current) => ({ ...current, [field]: value })); setErrors((current) => ({ ...current, [field]: "" })); };
   const setType = (type) => { setForm((current) => ({ ...current, type, category: categoriesForType(type)[0] || "Other", status: current.status === "Received" ? "Cleared" : current.status })); setErrors({}); };
@@ -2668,22 +2738,31 @@ function TransactionModal({ accounts, transaction, categories, onClose, onSave, 
       if (!form.fromAccountId) nextErrors.fromAccountId = "Choose the source account.";
       if (!form.toAccountId) nextErrors.toAccountId = "Choose the destination account.";
       if (form.fromAccountId && form.fromAccountId === form.toAccountId) nextErrors.toAccountId = "Choose a different destination account.";
+      const source = availableAccounts.find((account) => account.id === form.fromAccountId);
+      const destination = availableAccounts.find((account) => account.id === form.toAccountId);
+      if (source && destination && source.currency !== destination.currency) nextErrors.toAccountId = "Choose an account with the same currency.";
+      const restoresOriginal = transaction?.type === "transfer" && transaction.status === "Cleared" && !transaction.archived && transaction.fromAccountId === form.fromAccountId ? Number(transaction.amount) : 0;
+      if (form.status === "Cleared" && source && Number(form.amount) > source.balance + restoresOriginal) nextErrors.amount = `${source.name} has ${formatMoney(source.balance + restoresOriginal, source.currency)} available.`;
     } else if (!form.accountId) nextErrors.accountId = "Choose an account.";
     setErrors(nextErrors);
     return !Object.keys(nextErrors).length;
   };
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
     if (!validate()) return;
     setSaving(true);
-    window.setTimeout(() => {
+    setErrors((current) => ({ ...current, _form: "" }));
+    try {
       const sourceId = form.type === "transfer" ? form.fromAccountId : form.accountId;
-      const account = accounts.find((item) => item.id === sourceId);
-      const nextTransaction = { ...form, id: transaction?.id || crypto.randomUUID(), merchant: form.merchant.trim(), amount: Math.abs(Number(form.amount)), category: form.type === "transfer" ? "Transfer" : form.category, currency: account?.currency || "CHF", icon: form.type === "transfer" ? "↔" : form.merchant.trim()[0].toUpperCase(), tone: form.type === "income" ? "green" : form.type === "transfer" ? "blue" : "red" };
-      onSave(nextTransaction, transaction);
+      const account = availableAccounts.find((item) => item.id === sourceId);
+      const nextTransaction = { ...form, id: operationIdRef.current, flowKind: form.type === "transfer" ? "transfer" : "regular", merchant: form.merchant.trim(), amount: Math.abs(Number(form.amount)), category: form.type === "transfer" ? "Transfer" : form.category, currency: account?.currency || "CHF", icon: form.type === "transfer" ? "↔" : form.merchant.trim()[0].toUpperCase(), tone: form.type === "income" ? "green" : form.type === "transfer" ? "blue" : "red" };
+      await onSave(nextTransaction, transaction);
       setSaved(nextTransaction);
+    } catch (saveError) {
+      setErrors((current) => ({ ...current, _form: saveError.message || "The transaction could not be saved." }));
+    } finally {
       setSaving(false);
-    }, 650);
+    }
   };
   const close = () => { if (!saving) onClose(); };
   const accountLabel = (account) => `${account.name}${account.lastFour ? ` •••• ${account.lastFour}` : ""} — ${formatSignedMoney(account.balance, account.currency)}`;
@@ -2718,7 +2797,7 @@ function TransactionModal({ accounts, transaction, categories, onClose, onSave, 
 <X size={19}/>
 </IconButton>
 </div>
-    {!accounts.length ? <div className="transaction-no-accounts">
+    {!availableAccounts.length ? <div className="transaction-no-accounts">
 <Wallet size={27}/>
 <h3>Connect an account first</h3>
 <p>Transactions need an account before they can update a balance.</p>
@@ -2735,19 +2814,19 @@ function TransactionModal({ accounts, transaction, categories, onClose, onSave, 
 <label>
 <span>From account</span>
 <select value={form.fromAccountId} onChange={(event) => update("fromAccountId", event.target.value)}>
-<option value="">Choose account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
+<option value="">Choose account</option>{availableAccounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
 <FieldError>{errors.fromAccountId}</FieldError>
 </label>
 <label>
 <span>To account</span>
 <select value={form.toAccountId} onChange={(event) => update("toAccountId", event.target.value)}>
-<option value="">Choose account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
+<option value="">Choose account</option>{availableAccounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
 <FieldError>{errors.toAccountId}</FieldError>
 </label>
 </div> : <label>
 <span>Account</span>
 <select value={form.accountId} onChange={(event) => update("accountId", event.target.value)}>
-<option value="">Choose account</option>{accounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
+<option value="">Choose account</option>{availableAccounts.map((account) => <option key={account.id} value={account.id}>{accountLabel(account)}</option>)}</select>
 <FieldError>{errors.accountId}</FieldError>
 </label>}
         <div className="modal-grid">
@@ -2806,9 +2885,10 @@ function TransactionModal({ accounts, transaction, categories, onClose, onSave, 
 </select> : null}</div>
       </div>
     </>}
+    <FieldError>{errors._form}</FieldError>
     <div className="modal-actions">
 <button type="button" className="secondary-button" onClick={close}>Cancel</button>
-<button type="submit" className="primary-button" disabled={saving || !accounts.length}>{saving ? <>
+<button type="submit" className="primary-button" disabled={saving || !availableAccounts.length}>{saving ? <>
 <CircleNotch className="spin" size={17}/>Saving…</> : isEditing ? "Save changes" : "Add transaction"}</button>
 </div>
   </form>
@@ -2872,8 +2952,16 @@ function KalsoonApp({ session }) {
 
   const navigate=(id)=>{setPage(id);setMobileNav(false);window.scrollTo({top:0,behavior:"smooth"});};
   const saveTransaction = async (nextTransaction, originalTransaction) => {
-    try { await saveRemoteTransaction(session.user.id, nextTransaction); await refreshData(); setTransactionNotice(`${nextTransaction.merchant} was ${originalTransaction ? "updated" : "added"}.`); }
-    catch (error) { handleDataError(error); setTransactionNotice(""); }
+    try {
+      await saveRemoteTransaction(session.user.id, nextTransaction);
+      if (!await refreshData()) throw new Error("The transaction was saved, but the refreshed balances could not be loaded. Retry to safely reconcile the view.");
+      setTransactionNotice(`${nextTransaction.merchant} was ${originalTransaction ? "updated" : "added"}.`);
+      return true;
+    } catch (error) {
+      handleDataError(error);
+      setTransactionNotice("");
+      throw error;
+    }
   };
   const duplicateTransaction = async (transaction) => {
     const duplicate = { ...transaction, id: crypto.randomUUID(), dateValue: new Date().toISOString().slice(0,10), timeValue: "12:00", merchant: `${transaction.merchant} copy` };
@@ -2884,8 +2972,28 @@ function KalsoonApp({ session }) {
     if (!transaction) return;
     try { await removeTransaction(id); await refreshData(); setTransactionNotice(`${transaction.merchant} was deleted.`); } catch (error) { handleDataError(error); }
   };
-  const confirmDebtPayment = async (debt, amount, accountId, dateValue) => { try { await recordDebtPayment(debt.id, accountId, amount, dateValue); await refreshData(); setTransactionNotice(`${debt.creditor} payment was added.`); } catch (error) { handleDataError(error); } };
-  const transferGoalMoney = async (goal, mode, amount, accountId) => { try { await recordGoalContribution(goal.id, accountId, amount, mode, new Date().toISOString().slice(0,10)); await refreshData(); setTransactionNotice(`${goal.name} transfer was added.`); } catch (error) { handleDataError(error); } };
+  const confirmDebtPayment = async (debt, amount, accountId, dateValue, transactionId) => {
+    try {
+      await recordDebtPayment(debt.id, accountId, amount, dateValue, transactionId);
+      if (!await refreshData()) throw new Error("The payment was recorded, but the refreshed balances could not be loaded. Retry to safely reconcile the view.");
+      setTransactionNotice(`${debt.creditor} payment was added.`);
+      return true;
+    } catch (error) {
+      handleDataError(error);
+      throw error;
+    }
+  };
+  const transferGoalMoney = async (goal, mode, amount, accountId, transactionId) => {
+    try {
+      await recordGoalContribution(goal.id, accountId, amount, mode, new Date().toISOString().slice(0,10), transactionId);
+      if (!await refreshData()) throw new Error("The goal transfer was recorded, but the refreshed balances could not be loaded. Retry to safely reconcile the view.");
+      setTransactionNotice(`${goal.name} transfer was added.`);
+      return true;
+    } catch (error) {
+      handleDataError(error);
+      throw error;
+    }
+  };
   const deleteLinkedAccount = (id) => {
     setAccountsRemote((current) => current.filter((account) => account.id !== id));
   };
@@ -2894,7 +3002,7 @@ function KalsoonApp({ session }) {
   const changePassword = async (password) => { const { error } = await supabase.auth.updateUser({ password }); if (error) throw error; };
 
   if (dataLoading) return <div className="data-state-page"><CircleNotch className="spin" size={30}/><h2>Loading your financial workspace…</h2><p>Accounts, budgets and goals are being connected securely.</p></div>;
-  const content={dashboard:<Dashboard transactions={transactions} accounts={accounts} budgets={budgets} debts={debts} goals={goals} onNavigate={navigate}/>,accounts:<Accounts accounts={accounts} setAccounts={setAccountsRemote}/>,transactions:<Transactions transactions={transactions} accounts={accounts} query={query} setQuery={setQuery} filter={transactionFilter} setFilter={setTransactionFilter} notice={transactionNotice} setNotice={setTransactionNotice} onAdd={()=>setTransactionEditor({mode:"create"})} onEdit={(transaction)=>setTransactionEditor({mode:"edit",transaction})} onDuplicate={duplicateTransaction} onDelete={deleteTransaction}/>,budget:<BudgetPage budgets={budgets} setBudgets={setBudgetsRemote} customCategories={customCategories} setCustomCategories={setCustomCategories} transactions={transactions}/>,debt:<DebtPage debts={debts} setDebts={setDebtsRemote} accounts={accounts} onConfirmedPayment={confirmDebtPayment}/>,goals:<GoalsPage goals={goals} setGoals={setGoalsRemote} transactions={transactions} accounts={accounts} onGoalTransfer={transferGoalMoney}/>,reports:<ReportsPage transactions={transactions}/>,settings:<SettingsPage settings={settings} setSettings={setSettingsRemote} accounts={accounts} setAccounts={setAccountsRemote} transactions={transactions} setTransactions={setTransactionsRemote} budgets={budgets} setBudgets={setBudgetsRemote} categories={categorySettings} setCategories={setCategoriesRemote} onDeleteAccount={deleteLinkedAccount} onDeleteProfile={deleteProfile} onChangePassword={changePassword} exportData={exportAllData}/>}[page];
+  const content={dashboard:<Dashboard transactions={transactions} accounts={accounts} budgets={budgets} debts={debts} goals={goals} onNavigate={navigate}/>,accounts:<AccountsWorkflow accounts={accounts} setAccounts={setAccountsRemote} transactions={transactions} budgets={budgets} debts={debts} goals={goals} onAddTransaction={(accountId)=>setTransactionEditor({mode:"create",accountId})} onImportTransactions={(rows)=>setTransactionsRemote((current)=>[...rows,...current])} onOpenDebt={()=>navigate("debt")} onOpenSettings={()=>navigate("settings")}/>,transactions:<Transactions transactions={transactions} accounts={accounts} query={query} setQuery={setQuery} filter={transactionFilter} setFilter={setTransactionFilter} notice={transactionNotice} setNotice={setTransactionNotice} onAdd={()=>setTransactionEditor({mode:"create"})} onEdit={(transaction)=>setTransactionEditor({mode:"edit",transaction})} onDuplicate={duplicateTransaction} onDelete={deleteTransaction}/>,budget:<BudgetPage budgets={budgets} setBudgets={setBudgetsRemote} customCategories={customCategories} setCustomCategories={setCustomCategories} transactions={transactions}/>,debt:<DebtPage debts={debts} setDebts={setDebtsRemote} accounts={accounts} onConfirmedPayment={confirmDebtPayment}/>,goals:<GoalsPage goals={goals} setGoals={setGoalsRemote} transactions={transactions} accounts={accounts} onGoalTransfer={transferGoalMoney}/>,reports:<ReportsPage transactions={transactions}/>,settings:<SettingsPage settings={settings} setSettings={setSettingsRemote} accounts={accounts} setAccounts={setAccountsRemote} transactions={transactions} setTransactions={setTransactionsRemote} budgets={budgets} setBudgets={setBudgetsRemote} categories={categorySettings} setCategories={setCategoriesRemote} onDeleteAccount={deleteLinkedAccount} onDeleteProfile={deleteProfile} onChangePassword={changePassword} exportData={exportAllData}/>}[page];
   return <div className={`app-shell ${sidebarExpanded?"sidebar-open":""}`}>
     {dataError ? <div className="data-error-banner" role="alert"><span>{dataError}</span><button onClick={refreshData}>Retry</button><button aria-label="Dismiss data error" onClick={() => setDataError("")}><X size={15}/></button></div> : null}
     <div className={`mobile-overlay ${mobileNav?"show":""}`} onClick={()=>setMobileNav(false)}/>
@@ -2902,13 +3010,13 @@ function KalsoonApp({ session }) {
 <Sidebar page={page} onNavigate={navigate} expanded setExpanded={()=>setMobileNav(false)} onSignOut={() => supabase.auth.signOut()}/>
 </div>
     <Sidebar page={page} onNavigate={navigate} expanded={sidebarExpanded} setExpanded={setSidebarExpanded} onSignOut={() => supabase.auth.signOut()}/>
-    <Topbar profile={settings.profile} page={page} transactionFilter={transactionFilter} onTransactionFilterChange={setTransactionFilter} onMenu={()=>setMobileNav(true)}/>
-    <main className={`main-content ${page === "dashboard" ? "dashboard-content" : ""}`}>{page === "dashboard" ? null : <PageHeader page={page} showPeriod={page !== "settings"} month={selectedMonth} onMonthChange={setSelectedMonth}/>} {content}<footer>
+    <Topbar profile={settings.profile} page={page} month={selectedMonth} onMonthChange={setSelectedMonth} transactionFilter={transactionFilter} onTransactionFilterChange={setTransactionFilter} onMenu={()=>setMobileNav(true)} onOpenProfile={()=>navigate("settings")}/>
+    <main className={`main-content ${page === "dashboard" ? "dashboard-content" : ""}`}>{page === "dashboard" ? null : <PageHeader page={page} showPeriod={page !== "settings" && page !== "accounts"} month={selectedMonth} onMonthChange={setSelectedMonth}/>} {content}<footer>
 <span>Kalsoon</span>
 <p>Your data stays yours. Built with calm in Switzerland.</p>
 </footer>
 </main>
-    {transactionEditor?<TransactionModal accounts={accounts} categories={categorySettings} transaction={transactionEditor.transaction} onClose={()=>setTransactionEditor(null)} onSave={saveTransaction} onViewTransactions={()=>{setTransactionEditor(null);navigate("transactions");}}/>:null}
+    {transactionEditor?<TransactionModal accounts={accounts} categories={categorySettings} transaction={transactionEditor.transaction} initialAccountId={transactionEditor.accountId} onClose={()=>setTransactionEditor(null)} onSave={saveTransaction} onViewTransactions={()=>{setTransactionEditor(null);navigate("transactions");}}/>:null}
   </div>;
 }
 
@@ -2921,5 +3029,22 @@ export function App() {
   }, []);
   if (path === "/") return <LandingPage/>;
   const initialMode = path === "/signup" ? "signup" : "signin";
-  return <AuthGate initialMode={initialMode}>{(session) => <KalsoonApp session={session}/>}</AuthGate>;
+  return <AuthGate initialMode={initialMode}>{(session) => <AuthenticatedApp session={session}/>}</AuthGate>;
+}
+
+function AuthenticatedApp({ session }) {
+  const [onboarding, setOnboarding] = useState(null);
+  const [onboardingError, setOnboardingError] = useState("");
+  useEffect(() => {
+    let active = true;
+    loadOnboardingState(session.user.id).then((state) => { if (active) setOnboarding(state); }).catch((error) => { if (active) setOnboardingError(error.message || "We could not load onboarding."); });
+    return () => { active = false; };
+  }, [session.user.id]);
+  if (onboardingError) {
+    const setupMissing = /schema cache|could not find the table|PGRST205/i.test(onboardingError);
+    return <div className="data-state-page"><X size={29}/><h2>{setupMissing ? "Your Kalsoon workspace is being prepared" : "We could not load your onboarding"}</h2><p>{setupMissing ? "Your account is ready. The secure financial workspace will be available as soon as its database migration has been applied." : "Please retry. If this continues, check your secure connection and try again."}</p><button className="primary-button" onClick={() => window.location.reload()}>Retry</button></div>;
+  }
+  if (!onboarding) return <div className="data-state-page"><CircleNotch className="spin" size={30}/><h2>Preparing your Kalsoon setup…</h2><p>Checking your saved setup progress.</p></div>;
+  if (!onboarding.completed) return <OnboardingFlow session={session} state={onboarding} onComplete={() => setOnboarding((current) => ({ ...current, completed: true, step: 5 }))} onSaveExit={() => supabase.auth.signOut()}/>;
+  return <KalsoonApp session={session}/>;
 }

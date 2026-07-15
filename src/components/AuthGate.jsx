@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { Bank, CheckCircle, CircleNotch, LockKey, SignOut } from "@phosphor-icons/react";
+import { CheckCircle, CircleNotch, LockKey, SignOut } from "@phosphor-icons/react";
 import { isSupabaseConfigured, supabase } from "../lib/supabase.js";
+import { KalsoonLogo } from "./KalsoonLogo.jsx";
+import { trackConversion } from "../lib/conversionAnalytics.js";
 
 export function AuthGate({ children, initialMode = "signin" }) {
   const [session, setSession] = useState(null);
@@ -35,11 +37,18 @@ export function AuthGate({ children, initialMode = "signin" }) {
   const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
   const submit = async (event) => {
     event.preventDefault(); setError(""); setMessage(""); setSubmitting(true);
+    if (mode === "signup") trackConversion("signup_started", { source: "auth_form", route: "/signup" });
     const response = mode === "signin"
       ? await supabase.auth.signInWithPassword({ email: form.email.trim(), password: form.password })
       : await supabase.auth.signUp({ email: form.email.trim(), password: form.password, options: { data: { first_name: form.firstName.trim(), last_name: form.lastName.trim() } } });
     if (response.error) setError(response.error.message);
-    else if (mode === "signup" && !response.data.session) setMessage("Check your email to confirm your Kalsoon account.");
+    else if (mode === "signup") {
+      trackConversion("signup_completed", { source: "auth_form", route: "/signup" });
+      const requiresEmailConfirmation = !response.data.session;
+      if (!requiresEmailConfirmation) await supabase.auth.signOut();
+      setMode("signin");
+      setMessage(requiresEmailConfirmation ? "Check your email to confirm your Kalsoon account, then sign in to begin." : "Your account is ready. Sign in to begin your Kalsoon setup.");
+    }
     setSubmitting(false);
   };
 
@@ -61,7 +70,7 @@ export function AuthGate({ children, initialMode = "signin" }) {
 }
 
 function AuthShell({ children }) {
-  return <main className="auth-page"><section className="auth-brand"><span className="logo-mark"><Bank size={25} weight="fill"/></span><div><strong>Kalsoon</strong><small>Every franc, with purpose</small></div></section><section className="auth-card">{children}</section><footer><span>Kalsoon</span><p>Your data stays yours. Built with calm in Switzerland.</p></footer></main>;
+  return <main className="auth-page"><a className="auth-brand" href="/" aria-label="Back to Kalsoon landing page"><KalsoonLogo tagline /></a><section className="auth-card">{children}</section><footer><span>Kalsoon</span><p>Your data stays yours. Built with calm in Switzerland.</p></footer></main>;
 }
 
 export function SignOutButton() {
