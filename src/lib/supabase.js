@@ -1,12 +1,10 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, isSupabaseConfigured } from "./supabase/client";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+export { isSupabaseConfigured };
+export const supabase = createClient();
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey);
-
-export const supabase = isSupabaseConfigured
-  ? createClient(supabaseUrl, supabasePublishableKey, {
-      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-    })
-  : null;
+export async function signOutCurrentSession() {
+  if (!supabase) return;
+  const { error } = await supabase.auth.signOut({ scope: "local" });
+  if (error) throw error;
+}

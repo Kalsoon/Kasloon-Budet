@@ -1,4 +1,7 @@
+"use client";
+
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import {
   ArrowDown,
   ArrowDownLeft,
@@ -55,12 +58,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { AuthGate } from "./components/AuthGate.jsx";
-import { LandingPage } from "./components/LandingPage.jsx";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow.jsx";
 import { KalsoonLogo } from "./components/KalsoonLogo.jsx";
 import { AccountsWorkflow } from "./components/accounts/AccountsWorkflow.jsx";
-import { supabase } from "./lib/supabase.js";
+import { signOutCurrentSession, supabase } from "./lib/supabase.js";
 import { loadOnboardingState } from "./lib/onboardingData.js";
 import {
   deleteFinancialData,
@@ -87,6 +88,19 @@ const NAV_ITEMS = [
   { id: "goals", label: "Goals", icon: Target },
   { id: "reports", label: "Reports", icon: ChartLineUp },
 ];
+
+const PAGE_ROUTES = {
+  dashboard: "/dashboard",
+  accounts: "/accounts",
+  transactions: "/transactions",
+  budget: "/budget",
+  debt: "/debts",
+  goals: "/goals",
+  reports: "/reports",
+  settings: "/settings",
+};
+
+const ROUTE_PAGES = Object.fromEntries(Object.entries(PAGE_ROUTES).map(([page, route]) => [route, page]));
 
 const TRANSACTION_FILTERS = ["All", "Groceries", "Transport", "Salary", "Transfer"];
 const APP_MONTH_OPTIONS = Array.from({ length: 12 }, (_, index) => {
@@ -209,20 +223,19 @@ const INITIAL_SETTINGS = {
 };
 
 const settingsFromSession = (session) => {
-  const saved = session.user.user_metadata?.kalsoon_settings || {};
+  const metadata = session.user.user_metadata || {};
+  const metadataPhoto = typeof metadata.avatar_url === "string" && !metadata.avatar_url.startsWith("data:")
+    ? metadata.avatar_url
+    : INITIAL_SETTINGS.profile.photo;
   return {
-    ...INITIAL_SETTINGS, ...saved,
+    ...INITIAL_SETTINGS,
     profile: {
-      ...INITIAL_SETTINGS.profile, ...saved.profile,
-      firstName: saved.profile?.firstName || session.user.user_metadata?.first_name || INITIAL_SETTINGS.profile.firstName,
-      lastName: saved.profile?.lastName || session.user.user_metadata?.last_name || INITIAL_SETTINGS.profile.lastName,
-      email: saved.profile?.email || session.user.email || INITIAL_SETTINGS.profile.email,
-      photo: saved.profile?.photo || session.user.user_metadata?.avatar_url || INITIAL_SETTINGS.profile.photo,
+      ...INITIAL_SETTINGS.profile,
+      firstName: metadata.first_name || INITIAL_SETTINGS.profile.firstName,
+      lastName: metadata.last_name || INITIAL_SETTINGS.profile.lastName,
+      email: session.user.email || INITIAL_SETTINGS.profile.email,
+      photo: metadataPhoto,
     },
-    preferences: { ...INITIAL_SETTINGS.preferences, ...saved.preferences },
-    notifications: { ...INITIAL_SETTINGS.notifications, ...saved.notifications },
-    security: { ...INITIAL_SETTINGS.security, ...saved.security },
-    subscription: { ...INITIAL_SETTINGS.subscription, ...saved.subscription },
   };
 };
 
@@ -2896,7 +2909,9 @@ function TransactionModal({ accounts, transaction, initialAccountId, categories,
 }
 
 function KalsoonApp({ session }) {
-  const [page,setPage]=useState("dashboard");
+  const router = useRouter();
+  const pathname = usePathname();
+  const page = ROUTE_PAGES[pathname] || "dashboard";
   const [sidebarExpanded,setSidebarExpanded]=useState(false);
   const [mobileNav,setMobileNav]=useState(false);
   const [transactionEditor,setTransactionEditor]=useState(null);
@@ -2950,7 +2965,8 @@ function KalsoonApp({ session }) {
   const setCategoriesRemote = remoteSetter(setCategorySettings, syncCategories);
   const setSettingsRemote = (updater) => setSettings((before) => { const after = typeof updater === "function" ? updater(before) : updater; queueMicrotask(async () => { try { await saveRemoteSettings(session.user.id, after); await refreshData(); } catch (error) { setSettings(before); handleDataError(error); } }); return after; });
 
-  const navigate=(id)=>{setPage(id);setMobileNav(false);window.scrollTo({top:0,behavior:"smooth"});};
+  const navigate=(id)=>{router.push(PAGE_ROUTES[id] || "/dashboard");setMobileNav(false);window.scrollTo({top:0,behavior:"smooth"});};
+  const signOut = async () => { await signOutCurrentSession(); router.replace("/login"); router.refresh(); };
   const saveTransaction = async (nextTransaction, originalTransaction) => {
     try {
       await saveRemoteTransaction(session.user.id, nextTransaction);
@@ -2998,7 +3014,7 @@ function KalsoonApp({ session }) {
     setAccountsRemote((current) => current.filter((account) => account.id !== id));
   };
   const exportAllData = () => { const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), accounts, transactions, budgets, debts, goals, categories: categorySettings, settings }, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = "kalsoon-data-export.json"; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); };
-  const deleteProfile = async () => { if (!window.confirm("Delete all Kalsoon financial data? This cannot be undone.")) return; try { await deleteFinancialData(session.user.id); await supabase.auth.signOut(); } catch (error) { handleDataError(error); } };
+  const deleteProfile = async () => { if (!window.confirm("Delete all Kalsoon financial data? This cannot be undone.")) return; try { await deleteFinancialData(session.user.id); await signOutCurrentSession(); router.replace("/login"); router.refresh(); } catch (error) { handleDataError(error); } };
   const changePassword = async (password) => { const { error } = await supabase.auth.updateUser({ password }); if (error) throw error; };
 
   if (dataLoading) return <div className="data-state-page"><CircleNotch className="spin" size={30}/><h2>Loading your financial workspace…</h2><p>Accounts, budgets and goals are being connected securely.</p></div>;
@@ -3007,9 +3023,9 @@ function KalsoonApp({ session }) {
     {dataError ? <div className="data-error-banner" role="alert"><span>{dataError}</span><button onClick={refreshData}>Retry</button><button aria-label="Dismiss data error" onClick={() => setDataError("")}><X size={15}/></button></div> : null}
     <div className={`mobile-overlay ${mobileNav?"show":""}`} onClick={()=>setMobileNav(false)}/>
     <div className={mobileNav?"mobile-sidebar show":"mobile-sidebar"}>
-<Sidebar page={page} onNavigate={navigate} expanded setExpanded={()=>setMobileNav(false)} onSignOut={() => supabase.auth.signOut()}/>
+<Sidebar page={page} onNavigate={navigate} expanded setExpanded={()=>setMobileNav(false)} onSignOut={signOut}/>
 </div>
-    <Sidebar page={page} onNavigate={navigate} expanded={sidebarExpanded} setExpanded={setSidebarExpanded} onSignOut={() => supabase.auth.signOut()}/>
+    <Sidebar page={page} onNavigate={navigate} expanded={sidebarExpanded} setExpanded={setSidebarExpanded} onSignOut={signOut}/>
     <Topbar profile={settings.profile} page={page} month={selectedMonth} onMonthChange={setSelectedMonth} transactionFilter={transactionFilter} onTransactionFilterChange={setTransactionFilter} onMenu={()=>setMobileNav(true)} onOpenProfile={()=>navigate("settings")}/>
     <main className={`main-content ${page === "dashboard" ? "dashboard-content" : ""}`}>{page === "dashboard" ? null : <PageHeader page={page} showPeriod={page !== "settings" && page !== "accounts"} month={selectedMonth} onMonthChange={setSelectedMonth}/>} {content}<footer>
 <span>Kalsoon</span>
@@ -3020,19 +3036,10 @@ function KalsoonApp({ session }) {
   </div>;
 }
 
-export function App() {
-  const [path, setPath] = useState(() => window.location.pathname);
-  useEffect(() => {
-    const onPopState = () => setPath(window.location.pathname);
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
-  if (path === "/") return <LandingPage/>;
-  const initialMode = path === "/signup" ? "signup" : "signin";
-  return <AuthGate initialMode={initialMode}>{(session) => <AuthenticatedApp session={session}/>}</AuthGate>;
-}
-
-function AuthenticatedApp({ session }) {
+export function AuthenticatedApp({ user }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const session = useMemo(() => ({ user }), [user]);
   const [onboarding, setOnboarding] = useState(null);
   const [onboardingError, setOnboardingError] = useState("");
   useEffect(() => {
@@ -3040,11 +3047,17 @@ function AuthenticatedApp({ session }) {
     loadOnboardingState(session.user.id).then((state) => { if (active) setOnboarding(state); }).catch((error) => { if (active) setOnboardingError(error.message || "We could not load onboarding."); });
     return () => { active = false; };
   }, [session.user.id]);
+  useEffect(() => {
+    if (!onboarding) return;
+    if (!onboarding.completed && pathname !== "/onboarding") router.replace("/onboarding");
+    if (onboarding.completed && pathname === "/onboarding") router.replace("/dashboard");
+  }, [onboarding, pathname, router]);
   if (onboardingError) {
     const setupMissing = /schema cache|could not find the table|PGRST205/i.test(onboardingError);
     return <div className="data-state-page"><X size={29}/><h2>{setupMissing ? "Your Kalsoon workspace is being prepared" : "We could not load your onboarding"}</h2><p>{setupMissing ? "Your account is ready. The secure financial workspace will be available as soon as its database migration has been applied." : "Please retry. If this continues, check your secure connection and try again."}</p><button className="primary-button" onClick={() => window.location.reload()}>Retry</button></div>;
   }
   if (!onboarding) return <div className="data-state-page"><CircleNotch className="spin" size={30}/><h2>Preparing your Kalsoon setup…</h2><p>Checking your saved setup progress.</p></div>;
-  if (!onboarding.completed) return <OnboardingFlow session={session} state={onboarding} onComplete={() => setOnboarding((current) => ({ ...current, completed: true, step: 5 }))} onSaveExit={() => supabase.auth.signOut()}/>;
+  if (!onboarding.completed) return <OnboardingFlow session={session} state={onboarding} onComplete={() => { setOnboarding((current) => ({ ...current, completed: true, step: 5 })); router.replace("/dashboard"); }} onSaveExit={async () => { await signOutCurrentSession(); router.replace("/login"); router.refresh(); }}/>;
+  if (pathname === "/onboarding") return <div className="data-state-page"><CircleNotch className="spin" size={30}/><h2>Opening your Kalsoon workspace…</h2></div>;
   return <KalsoonApp session={session}/>;
 }

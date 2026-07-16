@@ -4,7 +4,7 @@
 
 1. Copy `.env.example` to `.env.local`.
 2. Add the Project URL and the `sb_publishable_...` key from the Supabase Connect dialog.
-3. Never add a secret or service-role key to a `VITE_` variable.
+3. Never add a secret or service-role key to a `NEXT_PUBLIC_` variable.
 4. Link and migrate the project:
 
    ```bash
@@ -13,7 +13,7 @@
    npx supabase db push
    ```
 
-5. In Authentication → URL Configuration, add the local and production Vite URLs.
+5. In Authentication → URL Configuration, add the local and production Next.js URLs, including `/auth/callback` as an allowed redirect target.
 
 ## Migration phases
 
