@@ -127,15 +127,6 @@ export async function syncGoals(userId, before, after) {
 }
 
 export async function saveSettings(userId, settings) {
-  const { error: authError } = await supabase.auth.updateUser({
-    data: {
-      kalsoon_settings: settings,
-      first_name: settings.profile.firstName,
-      last_name: settings.profile.lastName,
-      avatar_url: settings.profile.photo || null,
-    },
-  });
-  if (authError) throw new Error(`Profile: ${authError.message}`);
   try {
     await Promise.all([
       upsert("profiles", [{ id: userId, first_name: settings.profile.firstName, last_name: settings.profile.lastName, email: settings.profile.email, avatar_url: settings.profile.photo || null }]),
